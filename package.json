@@ -1,0 +1,43 @@
+{
+  "name": "glyf",
+  "version": "1.0.0",
+  "description": "Signature biometric authentication library — curvature-weighted DTW, inter-stroke rhythm fingerprinting, adversarial forgery simulation, and explainable rejection.",
+  "keywords": [
+    "signature",
+    "biometric",
+    "authentication",
+    "dtw",
+    "dynamic-time-warping",
+    "handwriting",
+    "signature-verification",
+    "glyph"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --noEmit && node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --noEmit --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.9.0"
+  }
+}
