@@ -5,7 +5,7 @@ export interface StrokePoint {
   y: number;
   t: number;
   v?: number;        // normalized velocity [0,1], added during preprocessing
-  pressure?: number; // stylus pressure [0,1] if device supports it
+  pressure?: number; // stylus/touch pressure [0,1] — undefined for mouse; activates DTW pressure channel
 }
 
 export interface SignatureData {
@@ -89,6 +89,7 @@ export interface EnrollmentTemplate {
   avgFeatures: FeatureVector;
   avgRhythm: RhythmProfile;
   processedSamples: StrokePoint[][];
+  avgProcessedStrokes: StrokePoint[][];  // per-stroke, for stroke-aware verification
   adaptiveBandFraction: number;
   adaptiveThreshold: number;
   templateHash: string;

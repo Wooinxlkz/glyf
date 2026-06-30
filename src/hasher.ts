@@ -90,14 +90,20 @@ export function hashTemplateSync(
 /**
  * Returns only the safe-to-store fields from a feature vector.
  * Omits raw timing fields that could reveal the device or context.
+ *
+ * Fields chosen are the highest-discriminative channels that are also
+ * safe to expose (no raw timestamps, no absolute canvas coordinates).
+ * directionChangeRate is intentionally excluded — it is a zero-weight
+ * channel that was removed from scoring as too jitter-sensitive.
  */
 export function safeStorageTemplate(features: FeatureVector): Partial<FeatureVector> {
   return {
-    strokeCount: Math.round(features.strokeCount),
-    aspectRatio: Math.round(features.aspectRatio * 100) / 100,
-    totalPathLength: Math.round(features.totalPathLength * 1000) / 1000,
-    curvatureEntropy: Math.round(features.curvatureEntropy * 1000) / 1000,
-    directionChangeRate: Math.round(features.directionChangeRate * 1000) / 1000,
+    strokeCount:             Math.round(features.strokeCount),
+    aspectRatio:             Math.round(features.aspectRatio * 100) / 100,
+    totalPathLength:         Math.round(features.totalPathLength * 1000) / 1000,
+    curvatureEntropy:        Math.round(features.curvatureEntropy * 1000) / 1000,
     terminalVelocityProfile: Math.round(features.terminalVelocityProfile * 1000) / 1000,
+    microtremorIndex:        Math.round(features.microtremorIndex * 10000) / 10000,    // high-disc v2
+    interStrokeRhythmRatio:  Math.round(features.interStrokeRhythmRatio * 1000) / 1000, // high-disc v2
   };
 }

@@ -1,7 +1,7 @@
 // ─── GLYF — Public API ───────────────────────────────────────────────────────
 // Signature biometric authentication library.
 // Novel contributions:
-//   1. Multi-channel additive DTW (spatial + velocity + curvature + direction)
+//   1. Multi-channel additive DTW (spatial + velocity + curvature + direction + pressure)
 //   2. Per-user adaptive Sakoe-Chiba band (derived from enrollment velocity variance)
 //   3. Speed-invariant microtremor index (CV of windowed velocity — forgery smoother)
 //   4. Inter-stroke rhythm fingerprinting (pause timing as biometric channel)
@@ -26,7 +26,7 @@ export type {
   VerificationResult,
 } from "./types";
 
-export { preprocess, normalizeCoords, normalizeTime, addVelocity, downsample } from "./normalizer";
+export { preprocess, normalizeCoords, normalizeTime, addVelocity, downsample, preprocessPerStroke } from "./normalizer";
 
 export {
   dtw,
@@ -36,7 +36,7 @@ export {
   computeAdaptiveThreshold,
 } from "./dtw";
 
-export { curvatureDtw, curvatureDtwSimilarity } from "./curvdtw";
+export { curvatureDtw, curvatureDtwSimilarity, strokeMinScore } from "./curvdtw";
 
 export {
   extractFeatures,
@@ -93,9 +93,9 @@ export const MIN_ENROLLMENT_SAMPLES = 3;
 
 // ─── Imports for high-level API ───────────────────────────────────────────────
 import type { SignatureData, EnrollmentTemplate, VerificationResult } from "./types";
-import { preprocess } from "./normalizer";
+import { preprocess, preprocessPerStroke } from "./normalizer";
 import { computeAdaptiveBand, computeAdaptiveThreshold } from "./dtw";
-import { curvatureDtw, curvatureDtwSimilarity } from "./curvdtw";
+import { curvatureDtw, curvatureDtwSimilarity, strokeMinScore } from "./curvdtw";
 import { extractFeatures, averageFeatureVectors, featureSimilarity } from "./features";
 import { extractRhythm, averageRhythmProfiles, rhythmSimilarity } from "./rhythm";
 import { extractAutocorr, autocorrSimilarity } from "./autocorr";
@@ -130,6 +130,11 @@ export function enroll(samples: SignatureData[]): EnrollmentTemplate {
   const avgAutocorr = autocorrProfiles[0];
   const templateHash = hashTemplateSync(avgFeatures);
 
+  // Per-stroke processed data from the first (most canonical) sample.
+  // Used by strokeMinScore() so each stroke must pass individually — prevents
+  // a good "C" match from averaging up a bad "H≠T" match.
+  const avgProcessedStrokes = preprocessPerStroke(samples[0].strokes, samples[0]);
+
   return {
     rawSamples: samples,
     avgFeatures,
@@ -138,6 +143,7 @@ export function enroll(samples: SignatureData[]): EnrollmentTemplate {
     avgTopology,
     avgAutocorr,
     processedSamples,
+    avgProcessedStrokes,
     adaptiveBandFraction: adaptiveBand,
     adaptiveThreshold,
     templateHash,
@@ -167,7 +173,17 @@ export function verify(
 
   // Compute per-channel scores
   const rawCurvDist = curvatureDtw(refProcessed, testProcessed, band);
-  const shapeScore = curvatureDtwSimilarity(rawCurvDist, refProcessed.length, testProcessed.length);
+  const flatShapeScore = curvatureDtwSimilarity(rawCurvDist, refProcessed.length, testProcessed.length);
+
+  // Stroke-aware gate: compare strokes individually and take the minimum.
+  // A forgery sharing a first stroke (e.g. C in "CT" vs "CH") can no longer
+  // average out the mismatch on the second stroke (H vs T).
+  const testProcessedStrokes = preprocessPerStroke(test.strokes, test);
+  const refProcessedStrokes  = template.avgProcessedStrokes ?? [];
+  const strokeScore = refProcessedStrokes.length > 0 && testProcessedStrokes.length > 0
+    ? strokeMinScore(refProcessedStrokes, testProcessedStrokes, band)
+    : flatShapeScore;
+  const shapeScore = Math.min(flatShapeScore, strokeScore);
   const featScore = featureSimilarity(template.avgFeatures, testFeatures);
   const rhythmScore = rhythmSimilarity(template.avgRhythm, testRhythm);
   const autocorrScore = autocorrSimilarity(template.avgAutocorr, testAutocorr);

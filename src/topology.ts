@@ -128,10 +128,13 @@ function editDistance(a: Direction[], b: Direction[]): number {
       if (a[i - 1] === b[j - 1]) {
         dp[i][j] = dp[i - 1][j - 1];
       } else {
-        // Adjacent directions (e.g. N↔NE) cost 0.5, others cost 1
-        const adjacentCost = Math.abs(
-          DIR_LABELS.indexOf(a[i - 1]) - DIR_LABELS.indexOf(b[j - 1])
-        ) <= 1 ? 0.5 : 1;
+        // Adjacent directions (e.g. N↔NE, and the circular wrap E↔SE) cost 0.5, others cost 1.
+        // MUST use circular difference: |0 − 7| = 7 in linear space, but min(7, 8−7) = 1 circularly.
+        const idxA = DIR_LABELS.indexOf(a[i - 1]);
+        const idxB = DIR_LABELS.indexOf(b[j - 1]);
+        const linearDiff = Math.abs(idxA - idxB);
+        const circularDiff = Math.min(linearDiff, DIR_LABELS.length - linearDiff);
+        const adjacentCost = circularDiff <= 1 ? 0.5 : 1;
         dp[i][j] = adjacentCost + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
       }
     }

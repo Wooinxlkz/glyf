@@ -6,6 +6,7 @@
 // which makes the gate harder to fool.
 
 import type { StrokePoint } from "./types";
+import { curvatureDtw, curvatureDtwSimilarity } from "./curvdtw";
 
 const VELOCITY_WEIGHT = 0.35;
 const DEFAULT_BAND_FRACTION = 0.15;
@@ -126,19 +127,23 @@ export function compareSequences(
 /**
  * Compute a per-user adaptive threshold from enrollment self-consistency.
  * Consistent signers get a tighter gate; variable signers get a looser one.
+ *
+ * IMPORTANT: must use curvatureDtw + curvatureDtwSimilarity — the same scorer
+ * used in verify() — so the calibrated threshold is on the same scale as the
+ * actual verification scores. Using the old dtw() + K=150 would miscalibrate
+ * the threshold against a completely different score distribution.
  */
 export function computeAdaptiveThreshold(
   processedSamples: StrokePoint[][],
   band: number,
-  base: number = 72
+  base: number = 75
 ): number {
   if (processedSamples.length < 2) return base;
   let minScore = 100;
   for (let a = 0; a < processedSamples.length; a++) {
     for (let b = a + 1; b < processedSamples.length; b++) {
-      const raw = dtw(processedSamples[a], processedSamples[b], band);
-      const avg = (processedSamples[a].length + processedSamples[b].length) / 2 || 1;
-      const score = Math.max(0, Math.min(100, 100 - (raw / avg) * 150));
+      const raw = curvatureDtw(processedSamples[a], processedSamples[b], band);
+      const score = curvatureDtwSimilarity(raw, processedSamples[a].length, processedSamples[b].length);
       if (score < minScore) minScore = score;
     }
   }

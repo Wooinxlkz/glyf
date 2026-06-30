@@ -3,6 +3,7 @@
 // contribution to failure — in plain language, per channel.
 
 import type { FeatureVector, RhythmProfile, RejectionReason, ExplainedResult } from "./types";
+import { getFeatureWeights } from "./features";
 
 const FEATURE_LABELS: Record<keyof FeatureVector, string> = {
   strokeCount: "Number of strokes",
@@ -122,7 +123,9 @@ export function explainResult(params: {
       });
     }
 
-    const keys = Object.keys(refFeatures) as (keyof FeatureVector)[];
+    const weights = getFeatureWeights();
+    const keys = (Object.keys(refFeatures) as (keyof FeatureVector)[])
+      .filter((key) => (weights[key] ?? 0) > 0); // skip zero-weight channels (e.g. directionChangeRate)
     const featReasons = keys
       .map((key) => {
         const ref = refFeatures[key] as number;

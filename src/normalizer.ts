@@ -78,15 +78,19 @@ export function addVelocity(points: StrokePoint[]): StrokePoint[] {
 }
 
 /**
- * Downsample to a fixed point count using linear interpolation index mapping.
- * Preserves the relative distribution of points along the path.
+ * Resample to exactly `target` points using nearest-neighbour index mapping.
+ * Works in both directions: downsamples long sequences and upsamples short
+ * ones (by repeating points) so the output is ALWAYS exactly `target` points.
+ * Consistent output length is required for DTW to produce finite distances.
  */
 export function downsample(points: StrokePoint[], target: number = SAMPLE_SIZE): StrokePoint[] {
-  if (points.length <= target) return points;
+  if (points.length === 0) return [];
+  if (points.length === target) return points;
   const result: StrokePoint[] = [];
-  const step = (points.length - 1) / (target - 1);
+  const last = Math.max(points.length - 1, 1);
+  const step = last / (target - 1);
   for (let i = 0; i < target; i++) {
-    result.push(points[Math.round(i * step)]);
+    result.push(points[Math.min(points.length - 1, Math.round(i * step))]);
   }
   return result;
 }
@@ -100,4 +104,44 @@ export function preprocess(
   sig?: Pick<SignatureData, "canvasWidth" | "canvasHeight" | "devicePixelRatio">
 ): StrokePoint[] {
   return downsample(addVelocity(normalizeCoords(flatPoints, sig)), SAMPLE_SIZE);
+}
+
+const STROKE_SAMPLE_SIZE = 48;
+
+/**
+ * Per-stroke preprocessing for stroke-aware DTW comparison.
+ *
+ * Unlike preprocess() which flattens all strokes into one 128-point sequence,
+ * this preserves stroke boundaries by normalizing each stroke individually
+ * (using the GLOBAL bounding box so relative positions are kept — a crossbar
+ * at the TOP of T vs the MIDDLE of H stays clearly different after normalization).
+ *
+ * This is the fix for multi-letter signature averaging: a good C match can
+ * no longer rescue a bad H≠T match when strokeMinScore() uses this output.
+ */
+export function preprocessPerStroke(
+  strokes: StrokePoint[][],
+  sig?: Pick<SignatureData, "canvasWidth" | "canvasHeight" | "devicePixelRatio">,
+  strokeSampleSize: number = STROKE_SAMPLE_SIZE,
+): StrokePoint[][] {
+  if (strokes.length === 0) return [];
+  const allPoints = strokes.flat();
+  if (allPoints.length === 0) return [];
+
+  // Normalize ALL points together using the global bounding box so that
+  // the relative spatial positions of strokes to each other are preserved.
+  const normalizedAll = normalizeCoords(allPoints, sig);
+
+  // Split the normalized flat array back into per-stroke arrays.
+  let idx = 0;
+  const normalizedStrokes: StrokePoint[][] = strokes.map(s => {
+    const ns = normalizedAll.slice(idx, idx + s.length);
+    idx += s.length;
+    return ns;
+  });
+
+  // Add per-stroke velocity, then downsample each stroke to a fixed length.
+  return normalizedStrokes
+    .filter(s => s.length > 0)
+    .map(s => downsample(addVelocity(s), strokeSampleSize));
 }

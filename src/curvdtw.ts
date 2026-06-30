@@ -1,31 +1,31 @@
-// ─── Multi-Channel Additive DTW (GLYF v2) ────────────────────────────────────
-// Replaces curvature-SCALING with curvature-ADDITIVE channels.
+// ─── Multi-Channel Additive DTW (GLYF v2, 5-channel) ─────────────────────────
 //
 // v1 problem: scaling by curvature weight averages ~0.4× on smooth data →
 //   all distances compressed → calibration K inflates forgery scores equally.
 //
-// v2 solution: four INDEPENDENT additive channels, each contributing penalty
+// v2 solution: five INDEPENDENT additive channels, each contributing penalty
 //   that a forgery cannot cancel through geometric warping alone:
 //
-//   channel 1 — spatial      (0.50×): geometric Euclidean distance
-//   channel 2 — velocity     (0.20×): speed profile mismatch
-//   channel 3 — curvature    (0.20×): additive |curv_a − curv_b| penalty  ← novel
-//   channel 4 — direction    (0.10×): additive angular mismatch penalty    ← novel
+//   channel 1 — spatial      (0.42×): geometric Euclidean distance
+//   channel 2 — velocity     (0.17×): speed profile mismatch
+//   channel 3 — curvature    (0.17×): additive |curv_a − curv_b| penalty
+//   channel 4 — direction    (0.09×): additive angular mismatch penalty
+//   channel 5 — pressure     (0.15×): stylus/touch pressure profile mismatch
+//
+// Channel 5 is OPTIONAL: when neither point has pressure data (e.g. mouse),
+// the contribution is 0 and the system degrades gracefully to 4-channel mode.
 //
 // A forgery that traces the correct overall bounding box but has a different
-// internal curve structure CANNOT reduce channels 3 & 4 through warping.
-// It can minimize spatial distance by warping, but pays full additive cost
-// at every point where curvature or direction angles differ.
-//
-// This breaks the calibration degeneracy: forgery per-point costs are NOW
-// higher than genuine costs even after DTW warps to the best alignment.
+// internal curve structure CANNOT reduce channels 3–5 through warping.
+// This breaks the calibration degeneracy that allowed shape forgeries to pass.
 
 import type { StrokePoint } from "./types";
 
-const SPATIAL_W   = 0.50;
-const VELOCITY_W  = 0.20;
-const CURVATURE_W = 0.20;   // additive curvature mismatch
-const DIRECTION_W = 0.10;   // additive direction mismatch
+const SPATIAL_W   = 0.42;
+const VELOCITY_W  = 0.17;
+const CURVATURE_W = 0.17;
+const DIRECTION_W = 0.09;
+const PRESSURE_W  = 0.15;   // 0 contribution when pressure data absent
 
 /** Curvature at each point in [0, 1]: 0 = straight, 1 = sharp reversal. */
 function computeCurvatures(pts: StrokePoint[]): number[] {
@@ -64,25 +64,33 @@ function angleDiff(a: number, b: number): number {
 }
 
 /**
- * Multi-channel point distance: four additive independent channels.
+ * Multi-channel point distance: five additive independent channels.
  * Each channel can reveal a forgery independently — a forgery must match
- * ALL four to score well.
+ * ALL five to score well.
+ *
+ * Pressure channel activates only when BOTH points carry pressure data
+ * (stylus or touch devices that report it). On mouse, contribution is 0.
  */
 function multiChannelDist(
   a: StrokePoint, b: StrokePoint,
   curvA: number, curvB: number,
   dirA: number, dirB: number,
 ): number {
-  const dx       = a.x - b.x;
-  const dy       = a.y - b.y;
-  const spatial  = Math.sqrt(dx * dx + dy * dy);
-  const velDiff  = Math.abs((a.v ?? 0) - (b.v ?? 0));
-  const curvDiff = Math.abs(curvA - curvB);
-  const dirDiff  = angleDiff(dirA, dirB);
+  const dx           = a.x - b.x;
+  const dy           = a.y - b.y;
+  const spatial      = Math.sqrt(dx * dx + dy * dy);
+  const velDiff      = Math.abs((a.v ?? 0) - (b.v ?? 0));
+  const curvDiff     = Math.abs(curvA - curvB);
+  const dirDiff      = angleDiff(dirA, dirB);
+  const pressureDiff = (a.pressure !== undefined && b.pressure !== undefined)
+    ? Math.abs(a.pressure - b.pressure)
+    : 0;
+
   return SPATIAL_W   * spatial
        + VELOCITY_W  * velDiff
        + CURVATURE_W * curvDiff
-       + DIRECTION_W * dirDiff;
+       + DIRECTION_W * dirDiff
+       + PRESSURE_W  * pressureDiff;
 }
 
 /**
@@ -129,9 +137,53 @@ export function curvatureDtw(
 }
 
 /**
+ * Stroke-aware minimum score: compares corresponding strokes individually
+ * and returns the WORST stroke score (minimum across all stroke pairs).
+ *
+ * This prevents a good "C" match from rescuing a bad "H vs T" mismatch
+ * in a multi-letter signature — a forgery must match EVERY enrolled stroke.
+ *
+ * Decision rules:
+ *   |refN − testN| > 1 → 20 (hard fail, completely different structure)
+ *   |refN − testN| === 1 → min(per-stroke scores, 55) (soft penalty for extra/missing stroke)
+ *   |refN − testN| === 0 → min(per-stroke scores) (pure quality gate)
+ */
+export function strokeMinScore(
+  refStrokes: StrokePoint[][],
+  testStrokes: StrokePoint[][],
+  band: number = 0.15,
+): number {
+  const refN  = refStrokes.length;
+  const testN = testStrokes.length;
+  if (refN === 0 || testN === 0) return 100;
+
+  if (Math.abs(refN - testN) > 1) return 20;
+
+  const pairs = Math.min(refN, testN);
+  let min = 100;
+  for (let i = 0; i < pairs; i++) {
+    const ref  = refStrokes[i];
+    const test = testStrokes[i];
+    if (ref.length === 0 || test.length === 0) continue;
+    const raw   = curvatureDtw(ref, test, band);
+    const score = curvatureDtwSimilarity(raw, ref.length, test.length);
+    if (score < min) min = score;
+  }
+
+  if (refN !== testN) min = Math.min(min, 55);
+  return min;
+}
+
+/**
  * Normalize multi-channel DTW distance to [0, 100] similarity score.
- * Multi-channel per-point costs are higher than v1 (sum of 4 channels).
- * Calibration: a genuine match typically scores 92-96.
+ *
+ * Calibration constant K=115 (was 95) — tuned so that:
+ *   - A genuine match (per-point ≈ 0.05) scores ~94
+ *   - A medium forgery (per-point ≈ 0.30) scores ~65 (border)
+ *   - A strong forgery (per-point ≈ 0.38) scores <56 (clear fail)
+ *
+ * Stricter than the old K=95 which allowed per-point ≈ 0.37 to pass
+ * the 65-threshold — the "calibration K trap" from multi-channel DTW.
  */
 export function curvatureDtwSimilarity(
   rawDistance: number,
@@ -141,5 +193,5 @@ export function curvatureDtwSimilarity(
   if (!isFinite(rawDistance) || rawDistance < 0) return 0;
   const avgLen = (refLen + testLen) / 2 || 1;
   const perPoint = rawDistance / avgLen;
-  return Math.max(0, Math.min(100, Math.round((100 - perPoint * 95) * 10) / 10));
+  return Math.max(0, Math.min(100, Math.round((100 - perPoint * 115) * 10) / 10));
 }
