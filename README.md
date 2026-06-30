@@ -216,4 +216,4 @@ npm run build
 
 ## License
 
-MIT © 2026 GLYF Contributors
+MIT © 2026 nulltrace - Karim
