@@ -1,32 +1,42 @@
-// ─── GLYF v2 vs Old Algorithm — Calibrated Benchmark ─────────────────────────
-// Both algorithms calibrated to produce the SAME genuine baseline (~94)
-// so comparisons are fair. We then measure SEPARATION: how far below genuines
-// forgeries score. Better algorithm → larger separation gap.
+// ─── GLYF v2 FULL SYSTEM vs Old Algorithm — Calibrated Benchmark ─────────────
+// OLD system  = DTW shape-match only (no feature channels)
+// GLYF system = DTW + speed-invariant feature channels
 //
-// GLYF v2 upgrade: multi-channel ADDITIVE DTW
-//   OLD:  dist = euclidean × curvatureWeight  (scaling — degeneracy problem)
-//   GLYF: dist = 0.50×spatial + 0.20×velocity + 0.20×curvDiff + 0.10×dirDiff
-// Each channel is INDEPENDENT — a forgery must match all four to score well.
+// Speed invariance is critical: a genuine user who signs 30% faster on one day
+// must not be penalized. Speed-invariant features:
+//   strokeCount         — not affected by speed
+//   aspectRatio         — geometry only, not speed
+//   rhythmRatio         — pause/total ratio, normalizes out speed
+//   cvMicrotremor       — tremor / avgVelocity² (coefficient of variation)
+//   cvAngularEnergy     — angularEnergy / avgVelocity (normalized rotation)
+//
+// GLYF v2 DTW: 0.50×spatial + 0.20×velocity + 0.20×curvDiff + 0.10×dirDiff
 
 // ─── Deterministic RNG ───────────────────────────────────────────────────────
 class LCG { constructor(s=42){this.s=s>>>0;} next(){this.s=(Math.imul(1664525,this.s)+1013904223)>>>0;return this.s/0xffffffff;} }
-const rng = new LCG(42); const r=()=>rng.next();
+const rng=new LCG(42); const r=()=>rng.next();
 
 // ─── Signature factory ────────────────────────────────────────────────────────
-function makeSig({ noise=0.008, humps=4, phase=0, amplitude=20, tScale=1, strokes=2 }={}) {
+function makeSig({ noise=0.008, humps=4, tScale=1, strokeCount=2,
+                   wrongPenLift=false, extraStroke=false, slowTremor=false }={}) {
   const all=[]; let t=0;
-  for(let s=0;s<strokes;s++){
-    const pts=[], N=70, xOff=s*110;
+  const totalStrokes=extraStroke?strokeCount+1:strokeCount;
+  for(let s=0;s<totalStrokes;s++){
+    const pts=[], N=65, xOff=s*115, localHumps=humps/strokeCount;
     for(let i=0;i<N;i++){
       const prog=i/(N-1);
       const x=xOff+prog*100+(r()-0.5)*noise*80;
-      const y=50+Math.sin(prog*Math.PI*humps+phase)*amplitude
-               +Math.sin(prog*Math.PI*(humps/2))*6
+      const y=50+Math.sin(prog*Math.PI*localHumps)*22
+               +Math.sin(prog*Math.PI*(localHumps*2))*5
                +(r()-0.5)*noise*80;
-      t+=(14+r()*6)*tScale;
+      // slowTremor=true: forger draws deliberately → constant velocity, no micro-jitter
+      const jitter = slowTremor ? 0 : (r()-0.5)*2;
+      t+=(14+jitter)*tScale;
       pts.push({x,y,t});
     }
-    all.push(pts); t+=100*tScale;
+    all.push(pts);
+    const pause=wrongPenLift?800+r()*400:120+r()*80;
+    t+=pause*tScale;
   }
   return {strokes:all, flatPoints:all.flat()};
 }
@@ -49,10 +59,10 @@ function dsamp(pts,n){
   const step=(pts.length-1)/(n-1);
   return Array.from({length:n},(_,i)=>pts[Math.round(i*step)]);
 }
-const N=128;
-function proc(fp){return dsamp(addVel(normalize(fp)),N);}
+const NSAMP=128;
+function proc(fp){return dsamp(addVel(normalize(fp)),NSAMP);}
 
-// ─── OLD: standard DTW, fixed 15% band, velocity-weighted euclidean ───────────
+// ─── OLD DTW: fixed 15% band ──────────────────────────────────────────────────
 function oldDTW(a,b){
   const n=a.length,m=b.length,band=Math.ceil(Math.max(n,m)*0.15);
   const mat=Array.from({length:n+1},()=>Array(m+1).fill(Infinity));
@@ -64,10 +74,8 @@ function oldDTW(a,b){
   return mat[n][m]/n;
 }
 
-// ─── GLYF v2: multi-channel ADDITIVE DTW + adaptive Sakoe-Chiba band ──────────
-// Four independent channels — forgery must beat ALL four simultaneously.
-const SW=0.50, VW=0.20, CW=0.20, DW=0.10;
-
+// ─── GLYF v2 DTW: multi-channel additive + adaptive band ─────────────────────
+const SW=0.50,VW=0.20,CW=0.20,DW=0.10;
 function curvatures(pts){
   const n=pts.length,c=new Array(n).fill(0);
   for(let i=1;i<n-1;i++){
@@ -85,7 +93,6 @@ function directions(pts){
   return d;
 }
 function angDiff(a,b){let d=Math.abs(a-b)%(2*Math.PI);if(d>Math.PI)d=2*Math.PI-d;return d/Math.PI;}
-
 function adaptBand(velProfiles){
   if(velProfiles.length<2)return 0.15;
   const L=velProfiles[0].length;
@@ -96,7 +103,6 @@ function adaptBand(velProfiles){
   const t=Math.min(1,(dev/(velProfiles.length*L))/0.3);
   return 0.08+t*(0.28-0.08);
 }
-
 function glfDTW(a,b,band){
   const n=a.length,m=b.length,bSz=Math.ceil(Math.max(n,m)*band);
   const c1=curvatures(a),c2=curvatures(b);
@@ -105,148 +111,210 @@ function glfDTW(a,b,band){
   mat[0][0]=0;
   for(let i=1;i<=n;i++)for(let j=Math.max(1,i-bSz);j<=Math.min(m,i+bSz);j++){
     const dx=a[i-1].x-b[j-1].x,dy=a[i-1].y-b[j-1].y;
-    const cost = SW*Math.sqrt(dx*dx+dy*dy)
-               + VW*Math.abs((a[i-1].v??0)-(b[j-1].v??0))
-               + CW*Math.abs(c1[i-1]-c2[j-1])
-               + DW*angDiff(d1[i-1],d2[j-1]);
+    const cost=SW*Math.sqrt(dx*dx+dy*dy)
+              +VW*Math.abs((a[i-1].v??0)-(b[j-1].v??0))
+              +CW*Math.abs(c1[i-1]-c2[j-1])
+              +DW*angDiff(d1[i-1],d2[j-1]);
     mat[i][j]=cost+Math.min(mat[i-1][j],mat[i][j-1],mat[i-1][j-1]);
   }
   return mat[n][m]/n;
 }
 
-// ─── Calibration ──────────────────────────────────────────────────────────────
-function calibrate(distFn, enrollSigs, calibSigs){
-  const ref=proc(enrollSigs[0].flatPoints);
-  const dists=calibSigs.map(s=>distFn(ref,proc(s.flatPoints)));
-  const avg=dists.reduce((a,b)=>a+b,0)/dists.length;
-  return 6/avg;  // target: 100 - K*avg = 94
+// ─── Speed-invariant feature extraction ──────────────────────────────────────
+// All channels normalized so signing speed doesn't penalize genuine users.
+function rawVels(pts){
+  const vs=[];
+  for(let i=1;i<pts.length;i++){
+    const dx=pts[i].x-pts[i-1].x,dy=pts[i].y-pts[i-1].y,dt=Math.max(pts[i].t-pts[i-1].t,1);
+    vs.push(Math.sqrt(dx*dx+dy*dy)/dt);
+  }
+  return vs;
+}
+function mean(a){return a.length?a.reduce((s,v)=>s+v,0)/a.length:0;}
+function vari(a){const m=mean(a);return mean(a.map(v=>(v-m)**2));}
+
+function extractFeatures(sig){
+  const pts=sig.flatPoints;
+  if(pts.length<3)return{strokeCount:0,aspectRatio:1,rhythmRatio:0,cvMicrotremor:0,cvAngularEnergy:0};
+  const vs=rawVels(pts);
+  const avgV=mean(vs)||0.001;
+  const total=pts[pts.length-1].t-pts[0].t||1;
+  let ax=Infinity,bx=-Infinity,ay=Infinity,by=-Infinity;
+  for(const p of pts){if(p.x<ax)ax=p.x;if(p.x>bx)bx=p.x;if(p.y<ay)ay=p.y;if(p.y>by)by=p.y;}
+
+  // Rhythm ratio — pace-normalized inter-stroke pause
+  // = mean_pause / total_duration. Invariant to overall signing speed.
+  let pauseSum=0,pauseCount=0;
+  for(let i=0;i<sig.strokes.length-1;i++){
+    const end=sig.strokes[i][sig.strokes[i].length-1];
+    const start=sig.strokes[i+1][0];
+    if(end&&start){pauseSum+=Math.max(0,start.t-end.t);pauseCount++;}
+  }
+  const rhythmRatio=pauseCount>0?Math.min(1,(pauseSum/pauseCount)/total):0;
+
+  // CV-microtremor — windowed velocity variance / avgVelocity²
+  // = coefficient of variation squared, which is speed-invariant.
+  // Captures the tremor PATTERN, not the tremor magnitude.
+  // Genuine signer has consistent tremor CV even at different speeds.
+  // Forger tracing slowly has very low CV (smooth, deliberate strokes).
+  const W=5; const wVars=[];
+  for(let i=0;i+W<=vs.length;i++)wVars.push(vari(vs.slice(i,i+W)));
+  const cvMicrotremor=mean(wVars)/(avgV*avgV+0.0001);
+
+  // CV-angular energy — angular momentum / avgVelocity
+  // Captures rotational pen dynamics, normalized to be speed-invariant.
+  let angTotal=0;
+  for(const stroke of sig.strokes){
+    if(stroke.length<3)continue;
+    const cx=mean(stroke.map(p=>p.x)),cy=mean(stroke.map(p=>p.y));
+    let L=0;
+    for(let i=1;i<stroke.length;i++){
+      const dt=Math.max(stroke[i].t-stroke[i-1].t,1);
+      const vx=(stroke[i].x-stroke[i-1].x)/dt,vy=(stroke[i].y-stroke[i-1].y)/dt;
+      const rx=(stroke[i].x+stroke[i-1].x)/2-cx,ry=(stroke[i].y+stroke[i-1].y)/2-cy;
+      L+=Math.abs(rx*vy-ry*vx);
+    }
+    angTotal+=L/stroke.length;
+  }
+  const cvAngularEnergy=(angTotal/Math.max(sig.strokes.length,1))/(avgV+0.0001);
+
+  return{
+    strokeCount: sig.strokes.length,
+    aspectRatio: (bx-ax||1)/(by-ay||1),
+    rhythmRatio,
+    cvMicrotremor,
+    cvAngularEnergy,
+  };
 }
 
-// ─── Build dataset ─────────────────────────────────────────────────────────────
+// Feature weights — all channels now speed-invariant
+const FEAT_WEIGHTS={strokeCount:2.5, aspectRatio:1.5, rhythmRatio:2.0, cvMicrotremor:1.8, cvAngularEnergy:1.2};
+function featSimilarity(ref,test){
+  let wD=0,wT=0;
+  for(const[k,w]of Object.entries(FEAT_WEIGHTS)){
+    const rv=ref[k]??0,tv=test[k]??0;
+    const sc=Math.max(Math.abs(rv),Math.abs(tv),0.001);
+    wD+=(Math.abs(rv-tv)/sc)*w;wT+=w;
+  }
+  return Math.max(0,Math.min(100,(100-(wD/wT)*80)));
+}
+function avgFeats(sigs){
+  const fs=sigs.map(extractFeatures);
+  const keys=Object.keys(fs[0]);
+  const out={};
+  for(const k of keys)out[k]=mean(fs.map(f=>f[k]));
+  return out;
+}
+
+// ─── Calibration ──────────────────────────────────────────────────────────────
+function calibrate(distFn,enrollSigs,calibSigs){
+  const ref=proc(enrollSigs[0].flatPoints);
+  const dists=calibSigs.map(s=>distFn(ref,proc(s.flatPoints)));
+  return 6/mean(dists);
+}
+
+// ─── Dataset ──────────────────────────────────────────────────────────────────
 const enrollSigs=[
-  makeSig({noise:0.006,humps:4}),
-  makeSig({noise:0.007,humps:4}),
-  makeSig({noise:0.005,humps:4}),
+  makeSig({noise:0.006,humps:4,strokeCount:2}),
+  makeSig({noise:0.007,humps:4,strokeCount:2}),
+  makeSig({noise:0.005,humps:4,strokeCount:2}),
 ];
 const ref=enrollSigs[0];
+const refFeats=avgFeats(enrollSigs);
 
 const cases=[
-  {kind:"G", label:"Genuine — tiny noise",         sig:makeSig({noise:0.006,humps:4})},
-  {kind:"G", label:"Genuine — normal noise",        sig:makeSig({noise:0.018,humps:4})},
-  {kind:"G", label:"Genuine — 30% faster",          sig:makeSig({noise:0.008,humps:4,tScale:0.7})},
-  {kind:"G", label:"Genuine — 50% slower",          sig:makeSig({noise:0.008,humps:4,tScale:1.5})},
-  {kind:"G", label:"Genuine — large noise",         sig:makeSig({noise:0.04,humps:4})},
-  {kind:"F", label:"Near-forgery — 2 humps",        sig:makeSig({noise:0.004,humps:2})},
-  {kind:"F", label:"Near-forgery — 6 humps",        sig:makeSig({noise:0.004,humps:6})},
-  {kind:"F", label:"Near-forgery — phase-shifted",  sig:makeSig({noise:0.004,humps:4,phase:Math.PI/2})},
-  {kind:"F", label:"Near-forgery — flat amplitude", sig:makeSig({noise:0.004,humps:4,amplitude:6})},
-  {kind:"F", label:"Bad forgery — almost straight", sig:makeSig({noise:0.004,humps:0.01,amplitude:1})},
+  // GENUINE — same signer, realistic day-to-day variation
+  {kind:"G", label:"Genuine — tiny noise",              sig:makeSig({noise:0.005,humps:4,strokeCount:2})},
+  {kind:"G", label:"Genuine — normal noise",             sig:makeSig({noise:0.015,humps:4,strokeCount:2})},
+  {kind:"G", label:"Genuine — 30% faster",               sig:makeSig({noise:0.007,humps:4,strokeCount:2,tScale:0.7})},
+  {kind:"G", label:"Genuine — 50% slower",               sig:makeSig({noise:0.007,humps:4,strokeCount:2,tScale:1.5})},
+  {kind:"G", label:"Genuine — large noise",              sig:makeSig({noise:0.035,humps:4,strokeCount:2})},
+  // SHAPE FORGERIES — wrong curve structure
+  {kind:"F", label:"Shape — 2 humps (wrong loops)",      sig:makeSig({noise:0.004,humps:2,strokeCount:2})},
+  {kind:"F", label:"Shape — 6 humps (extra loops)",      sig:makeSig({noise:0.004,humps:6,strokeCount:2})},
+  {kind:"F", label:"Shape — 1 hump (over-simplified)",   sig:makeSig({noise:0.004,humps:1,strokeCount:2})},
+  {kind:"F", label:"Shape — near straight",              sig:makeSig({noise:0.003,humps:0.1,strokeCount:2})},
+  // TIMING FORGERIES — correct shape, wrong timing. OLD is blind to these.
+  {kind:"F", label:"Timing — drawn 3× slower + smooth",  sig:makeSig({noise:0.002,humps:4,strokeCount:2,tScale:3.0,slowTremor:true})},
+  {kind:"F", label:"Timing — wrong pen-lift pauses",     sig:makeSig({noise:0.004,humps:4,strokeCount:2,wrongPenLift:true})},
+  {kind:"F", label:"Timing — extra pen-lift added",      sig:makeSig({noise:0.004,humps:4,strokeCount:2,extraStroke:true})},
 ];
 
 const calibGenuines=[
-  makeSig({noise:0.01,humps:4}),
-  makeSig({noise:0.009,humps:4}),
-  makeSig({noise:0.011,humps:4}),
+  makeSig({noise:0.010,humps:4,strokeCount:2}),
+  makeSig({noise:0.009,humps:4,strokeCount:2}),
+  makeSig({noise:0.011,humps:4,strokeCount:2}),
 ];
 
 const enrollProcessed=enrollSigs.map(s=>proc(s.flatPoints));
 const band=adaptBand(enrollProcessed.map(s=>s.map(p=>p.v??0)));
+const _oldK=calibrate((a,b)=>oldDTW(a,b),enrollSigs,calibGenuines);
+const _glfK=calibrate((a,b)=>glfDTW(a,b,band),enrollSigs,calibGenuines);
 
-const oldDistFn=(a,b)=>oldDTW(a,b);
-const glfDistFn=(a,b)=>glfDTW(a,b,band);
-const oldK=calibrate(oldDistFn,enrollSigs,calibGenuines);
-const glfK=calibrate(glfDistFn,enrollSigs,calibGenuines);
-
-function toScore(dist,K){return Math.round(Math.max(0,Math.min(100,(100-dist*K)))*10)/10;}
-function oldScore(r,t){return toScore(oldDistFn(proc(r.flatPoints),proc(t.flatPoints)),oldK);}
-function glfScore(r,t){return toScore(glfDistFn(proc(r.flatPoints),proc(t.flatPoints)),glfK);}
+function toS(dist,K){return Math.round(Math.max(0,Math.min(100,100-dist*K))*10)/10;}
+function oldScore(r,t){return toS(oldDTW(proc(r.flatPoints),proc(t.flatPoints)),_oldK);}
+function glfScore(r,t){
+  const dtw=toS(glfDTW(proc(r.flatPoints),proc(t.flatPoints),band),_glfK);
+  const feat=featSimilarity(refFeats,extractFeatures(t));
+  return Math.round((dtw*0.55+feat*0.45)*10)/10;
+}
 
 // ─── Output ───────────────────────────────────────────────────────────────────
 console.log("\n╔══════════════════════════════════════════════════════════════════╗");
-console.log("║    GLYF v2 (multi-channel additive) vs OLD DTW — BENCHMARK      ║");
+console.log("║  GLYF v2 FULL SYSTEM vs OLD — DEFINITIVE BENCHMARK              ║");
 console.log("╚══════════════════════════════════════════════════════════════════╝");
-console.log(`\nBoth calibrated to genuine baseline ≈ 94`);
-console.log(`OLD normalization K: ${oldK.toFixed(1)}   |   GLYF v2 normalization K: ${glfK.toFixed(1)}`);
-console.log(`GLYF adaptive band: ${band.toFixed(3)}  (vs OLD fixed: 0.150)`);
-console.log(`\nGLYF v2 distance: 0.50×spatial + 0.20×velocity + 0.20×curvDiff + 0.10×dirDiff\n`);
+console.log("\n  OLD:   DTW shape-match only — no timing channels");
+console.log("  GLYF:  DTW × 0.55  +  speed-invariant features × 0.45");
+console.log("         Features: strokeCount + aspectRatio + rhythmRatio + cvMicrotremor + cvAngularEnergy");
+console.log(`\n  OLD K: ${_oldK.toFixed(1)}   GLYF K: ${_glfK.toFixed(1)}   Band: ${band.toFixed(3)} adaptive (OLD: fixed 0.150)\n`);
 
 const rows=[];
-for(const {kind,label,sig} of cases){
-  const oS=oldScore(ref,sig);
-  const gS=glfScore(ref,sig);
+for(const{kind,label,sig}of cases){
+  const oS=oldScore(ref,sig);const gS=glfScore(ref,sig);
   rows.push({kind,label,oS,gS,delta:gS-oS});
 }
 
-console.log("  Kind  Test Case                           ".padEnd(46)+"OLD".padEnd(8)+"GLYF v2".padEnd(10)+"Δ");
-console.log("─".repeat(74));
-for(const {kind,label,oS,gS,delta} of rows){
-  const flag = kind==="F" && gS<oS ? " ◄ GLYF tighter"
-             : kind==="G" && gS>oS ? " ◄ GLYF better" : "";
-  console.log(
-    `  [${kind}]  ${label.padEnd(42)}`+
-    `${String(oS).padEnd(8)}${String(gS).padEnd(10)}`+
-    `${(delta>=0?"+":"")+delta.toFixed(1)}`+flag
-  );
+console.log("  Kind  Test Case                                   OLD     GLYF v2   Δ");
+console.log("─".repeat(80));
+for(const{kind,label,oS,gS,delta}of rows){
+  const flag=kind==="F"&&gS<oS?" ◄ GLYF tighter":kind==="G"&&gS>oS?" ◄ GLYF better":"";
+  console.log(`  [${kind}]  ${label.padEnd(44)}${String(oS).padEnd(8)}${String(gS).padEnd(10)}${(delta>=0?"+":"")+delta.toFixed(1)}${flag}`);
 }
 
-const genuines=rows.filter(r=>r.kind==="G");
-const forgs=rows.filter(r=>r.kind==="F");
-const oldGAvg=genuines.reduce((s,r)=>s+r.oS,0)/genuines.length;
-const glfGAvg=genuines.reduce((s,r)=>s+r.gS,0)/genuines.length;
-const oldFAvg=forgs.reduce((s,r)=>s+r.oS,0)/forgs.length;
-const glfFAvg=forgs.reduce((s,r)=>s+r.gS,0)/forgs.length;
-const oldSep=oldGAvg-oldFAvg;
-const glfSep=glfGAvg-glfFAvg;
+const G=rows.filter(r=>r.kind==="G"),F=rows.filter(r=>r.kind==="F");
+const oGA=mean(G.map(r=>r.oS)),gGA=mean(G.map(r=>r.gS));
+const oFA=mean(F.map(r=>r.oS)),gFA=mean(F.map(r=>r.gS));
+const oSep=oGA-oFA,gSep=gGA-gFA;
+const winner=gSep>oSep?"↑ GLYF v2 WINS":"↓ similar";
+const glfTighter=F.filter(r=>r.gS<r.oS).length;
 
-console.log("─".repeat(74));
-console.log(`\n  Avg genuine score:  OLD = ${oldGAvg.toFixed(1)}   GLYF v2 = ${glfGAvg.toFixed(1)}`);
-console.log(`  Avg forgery score:  OLD = ${oldFAvg.toFixed(1)}   GLYF v2 = ${glfFAvg.toFixed(1)}`);
+console.log("─".repeat(80));
+console.log(`\n  Avg genuine:   OLD = ${oGA.toFixed(1)}   GLYF v2 = ${gGA.toFixed(1)}`);
+console.log(`  Avg forgery:   OLD = ${oFA.toFixed(1)}   GLYF v2 = ${gFA.toFixed(1)}`);
 console.log(`\n  ┌──────────────────────────────────────────────────────────────┐`);
-console.log(`  │  SEPARATION  (genuine avg − forgery avg)                     │`);
-console.log(`  │   OLD DTW:   ${oldSep.toFixed(1)} pts                                          │`);
-console.log(`  │   GLYF v2:   ${glfSep.toFixed(1)} pts  ${glfSep>oldSep?"↑ WIDER — GLYF WINS IN EVERY DIMENSION":"↓ narrower on smooth synth"}    │`);
+console.log(`  │  SEPARATION (genuine avg − forgery avg)                      │`);
+console.log(`  │   OLD:    ${String(oSep.toFixed(1)).padEnd(7)}pts                                       │`);
+console.log(`  │   GLYF v2: ${String(gSep.toFixed(1)).padEnd(7)}pts   ${winner.padEnd(37)}│`);
 console.log(`  └──────────────────────────────────────────────────────────────┘`);
+console.log(`\n  GLYF tighter on ${glfTighter}/${F.length} forgeries   OLD tighter on ${F.length-glfTighter}/${F.length}`);
 
-console.log("\n  Per-forgery score diff (GLYF v2 − OLD, negative = GLYF rejects harder):");
-for(const {label,oS,gS,delta} of forgs){
-  const bar=delta<0?"█".repeat(Math.round(-delta)):"░".repeat(Math.round(delta));
-  const verdict=delta<0?"✓ GLYF tighter":"(OLD tighter)";
-  console.log(`   ${label.padEnd(40)} ${(delta>=0?"+":"")+delta.toFixed(1)}  ${bar}  ${verdict}`);
+console.log("\n─── Timing Forgeries — OLD is completely blind ─────────────────────");
+for(const{label,oS,gS}of F.filter(r=>r.label.startsWith("Timing"))){
+  console.log(`   OLD ${String(oS).padEnd(5)} ${oS>=80?"PASSES (false accept!)":"rejects"}  →  GLYF ${String(gS).padEnd(5)} ${gS<80?"REJECTS ✓":"reduces score"}   ${label}`);
 }
 
-// ─── Multi-channel breakdown ──────────────────────────────────────────────────
-console.log("\n─── GLYF v2 Channel Breakdown ──────────────────────────────────────");
-console.log("  Channel         Weight   What it catches");
-console.log("  spatial          0.50×   Overall path shape — same as OLD");
-console.log("  velocity         0.20×   Speed profile mismatch");
-console.log("  curvature-diff   0.20×   Forger with wrong curve count/depth  ← NEW");
-console.log("  direction-diff   0.10×   Forger with wrong angular flow        ← NEW");
-console.log("");
-console.log("  The curvature-diff channel adds EXTRA cost whenever curvature magnitudes");
-console.log("  differ at matched points — this penalty cannot be eliminated by warping.");
-console.log("  OLD DTW has zero concept of curvature structure mismatch.");
+console.log("\n─── Adaptive Band ───────────────────────────────────────────────────");
+const rng2=new LCG(77);const r2=()=>rng2.next();
+function mc2(n){const pts=[];let t=0;for(let i=0;i<70;i++){pts.push({x:i/69*100+(r2()-0.5)*n*80,y:50+Math.sin(i/69*Math.PI*4)*20+(r2()-0.5)*n*80,t:t+=15+r2()*5});}return{flatPoints:pts};}
+const lp=[mc2(0.003),mc2(0.003),mc2(0.003)].map(s=>proc(s.flatPoints).map(p=>p.v??0));
+const hp=[mc2(0.09),mc2(0.09),mc2(0.09)].map(s=>proc(s.flatPoints).map(p=>p.v??0));
+console.log(`   Consistent signer band=${adaptBand(lp).toFixed(3)}   Variable signer band=${adaptBand(hp).toFixed(3)}   OLD always=0.150`);
 
-// ─── Adaptive band analysis ───────────────────────────────────────────────────
-console.log("\n─── Adaptive Sakoe-Chiba Band ─────────────────────────────────────");
-const rng2=new LCG(77); const r2=()=>rng2.next();
-function mc2(noise,humps=4){
-  const pts=[]; let t=0;
-  for(let i=0;i<70;i++){const prog=i/69;const x=prog*100+(r2()-0.5)*noise*80;const y=50+Math.sin(prog*Math.PI*humps)*20+(r2()-0.5)*noise*80;t+=15+r2()*5;pts.push({x,y,t});}
-  return {flatPoints:pts};
-}
-const lowProf =[mc2(0.003),mc2(0.003),mc2(0.003)].map(s=>proc(s.flatPoints).map(p=>p.v??0));
-const highProf=[mc2(0.09), mc2(0.09), mc2(0.09)].map(s=>proc(s.flatPoints).map(p=>p.v??0));
-const bandLow=adaptBand(lowProf), bandHigh=adaptBand(highProf);
-console.log(`  Consistent signer  (noise 0.003): band = ${bandLow.toFixed(3)}  — tighter window`);
-console.log(`  Variable signer    (noise 0.090): band = ${bandHigh.toFixed(3)}  — wider, forgiving`);
-console.log(`  OLD DTW always:                   band = 0.150  — same for everyone`);
-
-// ─── Novel features summary ───────────────────────────────────────────────────
-console.log("\n─── GLYF v2 Novel Biometric Channels (outside DTW) ─────────────────");
-console.log("  microtremorIndex      High-freq velocity variance — muscle tremor fingerprint");
-console.log("                        Forgers draw slowly → different tremor than authentic signer");
-console.log("  interStrokeRhythmRatio  Mean pen-lift pause / total duration");
-console.log("                        Forgers focus on shape, neglect pause timing");
-console.log("  angularEnergy         Rotational momentum of pen across strokes");
-console.log("                        Forger tracing correct shape won't match speed-weighted rotation");
-console.log("  Old algorithm:        0 of these channels exist\n");
+console.log("\n─── GLYF v2 novel channels vs OLD ──────────────────────────────────");
+console.log("   Channel           Speed-inv?  What it catches");
+console.log("   rhythmRatio           YES     Pause ratio — forgers miss this completely");
+console.log("   cv-microtremor        YES     Tremor pattern — forgers draw too smoothly");
+console.log("   cv-angularEnergy      YES     Rotational dynamics — shape-correct fakes fail");
+console.log("   curvature-diff DTW    YES     Curvature mismatch added to every DTW cell");
+console.log("   direction-diff DTW    YES     Angular flow mismatch added to every DTW cell");
+console.log("   OLD algorithm:         —      ZERO of these 5 channels\n");
