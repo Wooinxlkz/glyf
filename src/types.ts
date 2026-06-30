@@ -34,6 +34,9 @@ export interface FeatureVector {
   // Temporal
   durationMs: number;
   strokeDurationVariance: number;
+  // GLYF v2 novel channels
+  microtremorIndex: number;       // high-freq velocity variance (muscle tremor fingerprint)
+  interStrokeRhythmRatio: number; // mean inter-stroke pause / total duration
 }
 
 export interface RhythmProfile {
@@ -70,7 +73,7 @@ export interface RejectionReason {
 export interface ExplainedResult {
   passed: boolean;
   // Individual channel scores
-  shapeScore: number;       // curvature-weighted DTW
+  shapeScore: number;       // multi-channel additive DTW
   featureScore: number;
   rhythmScore: number;      // histogram + autocorrelation
   angularScore: number;     // angular momentum
