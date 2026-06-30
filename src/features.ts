@@ -1,6 +1,13 @@
-// ─── Feature extraction ───────────────────────────────────────────────────────
-// Extended feature vector vs baseline: adds acceleration profile,
-// terminal velocity per stroke, and stroke duration variance.
+// ─── Feature extraction (GLYF v2) ────────────────────────────────────────────
+// 14-dimension feature vector.
+// v1 had 12 dimensions. v2 adds two novel biometric channels:
+//   microtremorIndex      — high-frequency velocity variance (muscle tremor)
+//   interStrokeRhythmRatio — mean inter-stroke pause as fraction of total duration
+//
+// These two channels capture signals that a spatial DTW has zero access to.
+// A forger who draws slowly and deliberately has different microtremor than
+// the authentic rapid cursive writer, and pauses between strokes at different
+// ratios than the genuine signer — even if the drawn shape is correct.
 
 import type { StrokePoint, SignatureData, FeatureVector } from "./types";
 
@@ -87,28 +94,64 @@ function directionChangeRate(points: StrokePoint[]): number {
 }
 
 /**
- * Average velocity of the last 10% of points in a stroke —
- * captures the "pen-lift" deceleration pattern unique to each signer.
+ * Average velocity of the last 10% of a stroke — pen-lift deceleration pattern.
  */
 function terminalVelocity(stroke: StrokePoint[]): number {
   if (stroke.length < 4) return 0;
   const tail = stroke.slice(Math.floor(stroke.length * 0.9));
-  const vs = rawVelocities(tail);
-  return mean(vs);
+  return mean(rawVelocities(tail));
 }
 
 /**
- * Mean absolute acceleration (rate of velocity change).
- * Captures how smoothly or jerkily the signer moves.
+ * Mean absolute acceleration — how smoothly or jerkily the signer moves.
  */
 function avgAcceleration(points: StrokePoint[]): number {
   const vs = rawVelocities(points);
   if (vs.length < 2) return 0;
   const accels: number[] = [];
-  for (let i = 1; i < vs.length; i++) {
-    accels.push(Math.abs(vs[i] - vs[i - 1]));
-  }
+  for (let i = 1; i < vs.length; i++) accels.push(Math.abs(vs[i] - vs[i - 1]));
   return mean(accels);
+}
+
+/**
+ * GLYF v2 novel: Microtremor index.
+ * Variance of velocity across small windows (W=5 points).
+ * Captures the high-frequency muscle tremor pattern unique to each signer.
+ * Forgers who draw slowly/deliberately have lower microtremor than
+ * authentic rapid cursive writers — impossible to fake under time pressure.
+ */
+function microtremorIndex(points: StrokePoint[]): number {
+  if (points.length < 10) return 0;
+  const W = 5;
+  const vs = rawVelocities(points);
+  const windowVars: number[] = [];
+  for (let i = 0; i + W <= vs.length; i++) {
+    windowVars.push(variance(vs.slice(i, i + W)));
+  }
+  return mean(windowVars);
+}
+
+/**
+ * GLYF v2 novel: Inter-stroke rhythm ratio.
+ * Mean inter-stroke pause duration normalized by total signing duration.
+ * Each signer has a characteristic pause pattern — how long they lift the
+ * pen between strokes. A forger concentrating on shape neglects this timing.
+ */
+function interStrokeRhythmRatio(sig: SignatureData): number {
+  if (sig.strokes.length < 2 || sig.flatPoints.length < 2) return 0;
+  const total =
+    sig.flatPoints[sig.flatPoints.length - 1].t - sig.flatPoints[0].t || 1;
+  let pauseSum = 0;
+  let count = 0;
+  for (let i = 0; i < sig.strokes.length - 1; i++) {
+    const end = sig.strokes[i][sig.strokes[i].length - 1];
+    const start = sig.strokes[i + 1][0];
+    if (end && start) {
+      pauseSum += Math.max(0, start.t - end.t);
+      count++;
+    }
+  }
+  return count > 0 ? Math.min(1, (pauseSum / count) / total) : 0;
 }
 
 export function extractFeatures(sig: SignatureData): FeatureVector {
@@ -120,6 +163,7 @@ export function extractFeatures(sig: SignatureData): FeatureVector {
       avgAcceleration: 0, terminalVelocityProfile: 0,
       curvatureEntropy: 0, directionChangeRate: 0,
       durationMs: 0, strokeDurationVariance: 0,
+      microtremorIndex: 0, interStrokeRhythmRatio: 0,
     };
   }
 
@@ -127,12 +171,9 @@ export function extractFeatures(sig: SignatureData): FeatureVector {
   const scale = Math.max(bbox.w, bbox.h) || 1;
   const vs = rawVelocities(pts);
   const duration = pts[pts.length - 1].t - pts[0].t || 1;
-
-  // Per-stroke durations variance
   const strokeDurations = sig.strokes.map((s) =>
     s.length > 1 ? s[s.length - 1].t - s[0].t : 0
   );
-  const tvProfile = mean(sig.strokes.map(terminalVelocity));
 
   return {
     strokeCount: sig.strokes.length,
@@ -142,15 +183,17 @@ export function extractFeatures(sig: SignatureData): FeatureVector {
     velocityVariance: variance(vs),
     peakVelocity: Math.max(...vs, 0),
     avgAcceleration: avgAcceleration(pts),
-    terminalVelocityProfile: tvProfile,
+    terminalVelocityProfile: mean(sig.strokes.map(terminalVelocity)),
     curvatureEntropy: curvatureEntropy(pts),
     directionChangeRate: directionChangeRate(pts),
     durationMs: duration,
     strokeDurationVariance: variance(strokeDurations),
+    microtremorIndex: microtremorIndex(pts),
+    interStrokeRhythmRatio: interStrokeRhythmRatio(sig),
   };
 }
 
-// Channel weights — more channels means lower individual weight
+// Channel weights — 14 channels total
 const WEIGHTS: Record<keyof FeatureVector, number> = {
   strokeCount: 2.0,
   aspectRatio: 1.5,
@@ -158,12 +201,14 @@ const WEIGHTS: Record<keyof FeatureVector, number> = {
   avgVelocity: 0.7,
   velocityVariance: 0.6,
   peakVelocity: 0.5,
-  avgAcceleration: 0.8,       // NEW
-  terminalVelocityProfile: 1.0, // NEW
+  avgAcceleration: 0.8,
+  terminalVelocityProfile: 1.0,
   curvatureEntropy: 1.5,
   directionChangeRate: 1.0,
   durationMs: 0.3,
-  strokeDurationVariance: 0.7, // NEW
+  strokeDurationVariance: 0.7,
+  microtremorIndex: 1.3,       // v2 novel — high discriminative power
+  interStrokeRhythmRatio: 1.5, // v2 novel — very hard to fake
 };
 
 export function featureSimilarity(ref: FeatureVector, test: FeatureVector): number {
