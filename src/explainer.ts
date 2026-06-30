@@ -17,6 +17,9 @@ const FEATURE_LABELS: Record<keyof FeatureVector, string> = {
   directionChangeRate: "Direction change rate",
   durationMs: "Total signing duration",
   strokeDurationVariance: "Stroke timing variance",
+  // GLYF v2 novel channels
+  microtremorIndex: "Micro-tremor pattern (CV of velocity — muscle tremor fingerprint)",
+  interStrokeRhythmRatio: "Inter-stroke pause timing ratio (pen-lift rhythm)",
 };
 
 function featureDeviation(ref: number, test: number): number {

@@ -26,6 +26,9 @@ const QUANT: Record<keyof FeatureVector, number> = {
   directionChangeRate: 0.01,
   durationMs: 100,
   strokeDurationVariance: 50,
+  // GLYF v2 novel channels
+  microtremorIndex: 0.0005,        // CV-normalized tremor — fine granularity
+  interStrokeRhythmRatio: 0.01,   // pause ratio — 1% resolution
 };
 
 function quantize(value: number, step: number): number {

@@ -1,15 +1,17 @@
 // ─── GLYF — Public API ───────────────────────────────────────────────────────
 // Signature biometric authentication library.
 // Novel contributions:
-//   1. Curvature-weighted DTW (high-curvature points matter more)
-//   2. Per-user adaptive Sakoe-Chiba band (derived from velocity variance)
-//   3. Inter-stroke rhythm fingerprinting (pause timing as biometric channel)
-//   4. Rhythmic autocorrelation (periodic rhythm structure)
-//   5. Angular momentum features (rotational pen dynamics)
-//   6. Stroke topology fingerprint (scale-invariant directional skeleton)
-//   7. Adversarial forgery simulation (7 attack types, fully automatic)
-//   8. Explainable rejection (per-channel failure reasons)
-//   9. Non-invertible template hashing
+//   1. Multi-channel additive DTW (spatial + velocity + curvature + direction)
+//   2. Per-user adaptive Sakoe-Chiba band (derived from enrollment velocity variance)
+//   3. Speed-invariant microtremor index (CV of windowed velocity — forgery smoother)
+//   4. Inter-stroke rhythm fingerprinting (pause timing as biometric channel)
+//   5. Rhythmic autocorrelation (periodic rhythm structure)
+//   6. Angular momentum features (rotational pen dynamics)
+//   7. Stroke topology fingerprint (scale-invariant directional skeleton)
+//   8. Multiplicative gate (timing channels can hard-reject a timing forgery)
+//   9. Adversarial forgery simulation (7 attack types, fully automatic, uses v2 DTW)
+//  10. Explainable rejection (per-channel failure reasons)
+//  11. Non-invertible template hashing
 
 export type {
   StrokePoint,
@@ -173,14 +175,36 @@ export function verify(
   const topologyScore = topologySimilarity(template.avgTopology, testTopology);
 
   const w = CHANNEL_WEIGHTS;
-  const combinedScore = Math.round((
+  const rawCombined =
     shapeScore    * w.shape    +
     featScore     * w.features +
     rhythmScore   * w.rhythm   +
     autocorrScore * w.autocorr +
     angularScore  * w.angular  +
-    topologyScore * w.topology
-  ) * 10) / 10;
+    topologyScore * w.topology;
+
+  // ── Multiplicative gate on timing-sensitive channels ──────────────────────
+  // A forgery that matches shape well but fails rhythm/autocorr is a timing
+  // forgery. These channels provide INDEPENDENT biometric evidence — when they
+  // fail hard, no amount of shape-match score should rescue the combined score.
+  //
+  // Rhythm gate mapping (rhythmScore → gate factor):
+  //   rhythmScore = 0   → gate = 0.68   (max 32% penalty)
+  //   rhythmScore = 65  → gate = 1.00   (no penalty)
+  //   rhythmScore > 65  → gate = 1.00   (no penalty)
+  //   Single-stroke sigs: rhythmScore defaults to 100 → gate = 1.0 (unaffected)
+  //
+  // Autocorr gate (secondary, lighter — activates only below 35):
+  //   autocorrScore = 0  → gate = 0.88
+  //   autocorrScore = 35 → gate = 1.00
+  const rhythmGate = rhythmScore < 65
+    ? Math.max(0.68, 0.68 + (rhythmScore / 65) * 0.32)
+    : 1.0;
+  const autocorrGate = autocorrScore < 35
+    ? Math.max(0.88, 0.88 + (autocorrScore / 35) * 0.12)
+    : 1.0;
+  const gate = rhythmGate * autocorrGate;
+  const combinedScore = Math.round(rawCombined * gate * 10) / 10;
 
   const explained = explainResult({
     shapeScore,

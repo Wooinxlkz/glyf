@@ -133,9 +133,27 @@ function rawVels(pts){
 function mean(a){return a.length?a.reduce((s,v)=>s+v,0)/a.length:0;}
 function vari(a){const m=mean(a);return mean(a.map(v=>(v-m)**2));}
 
+// Curvature entropy — 8-bin Shannon entropy of direction-change angles.
+// Encodes curve complexity (hump count, loop count). Speed-invariant.
+function curvEntropy(pts){
+  if(pts.length<3)return 0;
+  const angles=[];
+  for(let i=1;i<pts.length-1;i++){
+    const dx1=pts[i].x-pts[i-1].x,dy1=pts[i].y-pts[i-1].y;
+    const dx2=pts[i+1].x-pts[i].x,dy2=pts[i+1].y-pts[i].y;
+    angles.push(Math.abs(Math.atan2(dy2,dx2)-Math.atan2(dy1,dx1)));
+  }
+  const bins=new Array(8).fill(0);
+  for(const a of angles)bins[Math.min(7,Math.floor((a/Math.PI)*8))]++;
+  const tot=angles.length||1;
+  let ent=0;
+  for(const c of bins)if(c>0){const p=c/tot;ent-=p*Math.log2(p);}
+  return ent;
+}
+
 function extractFeatures(sig){
   const pts=sig.flatPoints;
-  if(pts.length<3)return{strokeCount:0,aspectRatio:1,rhythmRatio:0,cvMicrotremor:0,cvAngularEnergy:0};
+  if(pts.length<3)return{strokeCount:0,aspectRatio:1,rhythmRatio:0,cvMicrotremor:0,cvAngularEnergy:0,curvatureEntropy:0};
   const vs=rawVels(pts);
   const avgV=mean(vs)||0.001;
   const total=pts[pts.length-1].t-pts[0].t||1;
@@ -184,11 +202,16 @@ function extractFeatures(sig){
     rhythmRatio,
     cvMicrotremor,
     cvAngularEnergy,
+    curvatureEntropy: curvEntropy(pts),
   };
 }
 
-// Feature weights — all channels now speed-invariant
-const FEAT_WEIGHTS={strokeCount:2.5, aspectRatio:1.5, rhythmRatio:2.0, cvMicrotremor:1.8, cvAngularEnergy:1.2};
+// Feature weights — 6 channels, all speed-invariant.
+// curvatureEntropy (w=1.8): encodes hump/loop count — shape forgeries with
+//   wrong curve complexity are penalized. Weight matches library's features.ts.
+// rhythmRatio (w=2.0): catches timing forgeries (wrong pen-lift pauses).
+// cvMicrotremor (w=1.8): catches velocity-smoothed forgeries (robot-like).
+const FEAT_WEIGHTS={strokeCount:2.5, aspectRatio:1.5, rhythmRatio:2.0, cvMicrotremor:1.8, cvAngularEnergy:1.2, curvatureEntropy:1.8};
 function featSimilarity(ref,test){
   let wD=0,wT=0;
   for(const[k,w]of Object.entries(FEAT_WEIGHTS)){
@@ -255,8 +278,24 @@ function toS(dist,K){return Math.round(Math.max(0,Math.min(100,100-dist*K))*10)/
 function oldScore(r,t){return toS(oldDTW(proc(r.flatPoints),proc(t.flatPoints)),_oldK);}
 function glfScore(r,t){
   const dtw=toS(glfDTW(proc(r.flatPoints),proc(t.flatPoints),band),_glfK);
-  const feat=featSimilarity(refFeats,extractFeatures(t));
-  return Math.round((dtw*0.55+feat*0.45)*10)/10;
+  const tFeat=extractFeatures(t);
+  const feat=featSimilarity(refFeats,tFeat);
+  const raw=dtw*0.55+feat*0.45;
+
+  // Rhythm gate: if inter-stroke pause ratio diverges ≥2× from reference,
+  // a timing forgery cannot hide behind a strong shape score.
+  // rhythmRatio is already speed-invariant (pause/total both scale with speed).
+  const rRef=refFeats.rhythmRatio, rTest=tFeat.rhythmRatio;
+  const rhythmRat=(Math.max(rRef,rTest)+0.001)/(Math.min(rRef,rTest)+0.001);
+  const rhythmGate=rhythmRat>3.0?0.72:rhythmRat>2.0?0.88:1.0;
+
+  // Tremor gate: a forger who traces shapes slowly/deliberately has an
+  // unnaturally smooth velocity profile — cvMicrotremor drops below 35%
+  // of the genuine signer's value.
+  const cvRef=refFeats.cvMicrotremor, cvTest=tFeat.cvMicrotremor;
+  const tremGate=(cvRef>0.001&&cvTest<cvRef*0.35)?0.78:1.0;
+
+  return Math.round(raw*rhythmGate*tremGate*10)/10;
 }
 
 // ─── Output ───────────────────────────────────────────────────────────────────
@@ -265,7 +304,7 @@ console.log("║  GLYF v2 FULL SYSTEM vs OLD — DEFINITIVE BENCHMARK           
 console.log("╚══════════════════════════════════════════════════════════════════╝");
 console.log("\n  OLD:   DTW shape-match only — no timing channels");
 console.log("  GLYF:  DTW × 0.55  +  speed-invariant features × 0.45");
-console.log("         Features: strokeCount + aspectRatio + rhythmRatio + cvMicrotremor + cvAngularEnergy");
+console.log("         Features: strokeCount + aspectRatio + rhythmRatio + cvMicrotremor + cvAngularEnergy + curvatureEntropy");
 console.log(`\n  OLD K: ${_oldK.toFixed(1)}   GLYF K: ${_glfK.toFixed(1)}   Band: ${band.toFixed(3)} adaptive (OLD: fixed 0.150)\n`);
 
 const rows=[];

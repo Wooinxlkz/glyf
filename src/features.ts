@@ -114,21 +114,29 @@ function avgAcceleration(points: StrokePoint[]): number {
 }
 
 /**
- * GLYF v2 novel: Microtremor index.
- * Variance of velocity across small windows (W=5 points).
- * Captures the high-frequency muscle tremor pattern unique to each signer.
- * Forgers who draw slowly/deliberately have lower microtremor than
- * authentic rapid cursive writers — impossible to fake under time pressure.
+ * GLYF v2 novel: Microtremor index — speed-invariant CV form.
+ * Coefficient of variation of windowed velocity (W=5 points).
+ * Formula: mean(window_variance) / (avgVelocity² + ε)
+ *
+ * Why CV-normalized (not raw variance):
+ *   A genuine signer who signs 2× faster has 2× higher velocities and
+ *   therefore 4× higher raw variance — which would wrongly flag them.
+ *   Dividing by avgV² (coefficient of variation) removes the speed factor
+ *   so the tremor PATTERN is compared, not the tremor magnitude.
+ *   Forgers draw slowly/deliberately → abnormally smooth → CV near zero.
+ *   Authentic rapid cursive → natural velocity jitter → CV clearly above zero.
  */
 function microtremorIndex(points: StrokePoint[]): number {
   if (points.length < 10) return 0;
   const W = 5;
   const vs = rawVelocities(points);
+  const avgV = mean(vs) || 0.001;
   const windowVars: number[] = [];
   for (let i = 0; i + W <= vs.length; i++) {
     windowVars.push(variance(vs.slice(i, i + W)));
   }
-  return mean(windowVars);
+  // CV-normalized: speed-invariant tremor fingerprint
+  return mean(windowVars) / (avgV * avgV + 0.0001);
 }
 
 /**

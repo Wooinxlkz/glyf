@@ -18,7 +18,7 @@
 
 import type { StrokePoint } from "./types";
 import type { AdversarialReport } from "./types";
-import { compareSequences } from "./dtw";
+import { curvatureDtw, curvatureDtwSimilarity } from "./curvdtw";
 import { downsample } from "./normalizer";
 
 const SAMPLE_SIZE = 128;
@@ -141,9 +141,10 @@ export function runAdversarialSimulation(
   const flat = refProcessed.map((p) => ({ ...p }));
   attempts.push({ type: "Velocity smoothing", pts: downsample(velocitySmoothing(flat), SAMPLE_SIZE) });
 
-  // Score each forgery attempt
+  // Score each forgery attempt using GLYF v2 multi-channel DTW (not legacy v1)
   const results = attempts.map(({ type, pts }) => {
-    const { score } = compareSequences(refProcessed, pts, bandFraction);
+    const rawDist = curvatureDtw(refProcessed, pts, bandFraction);
+    const score = curvatureDtwSimilarity(rawDist, refProcessed.length, pts.length);
     return {
       forgeryType: type,
       score: Math.round(score * 10) / 10,
